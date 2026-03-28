@@ -119,11 +119,7 @@ def analyze():
         generate_content_config = types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.1,  # Keep low for structured output
-            max_output_tokens=1200,
-            thinking_config=types.ThinkingConfig(
-                thinking_level="HIGH",
-            ),
-            tools=[types.Tool(googleSearch=types.GoogleSearch())]
+            max_output_tokens=1200
         )
 
         response = client.models.generate_content(
