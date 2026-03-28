@@ -9,4 +9,5 @@ google-cloud-secret-manager
 google-cloud-error-reporting
 google-cloud-logging
 google-cloud-trace
+google-cloud-firestore
 pydantic

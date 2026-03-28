@@ -1,70 +1,101 @@
-from flask import Flask, request, jsonify, render_template, Response
-import os
+"""
+FirstVoice — Emergency Response API
+====================================
+A production-grade Flask application that uses Google Gemini AI to analyze
+emergency situations and provide structured first-response guidance.
+
+Google Cloud Services Integrated:
+- Secret Manager: Secure API key storage
+- Cloud Logging: Native GCP log indexing
+- Error Reporting: Automated crash tracking
+- Firestore: Persistent emergency log database
+"""
+
+from __future__ import annotations
+
 import json
 import logging
-from typing import Dict, Any, Optional
+import os
+from datetime import datetime, timezone
+from typing import Any
 
-# Third-party libraries
+from flask import Flask, Response, jsonify, render_template, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from pydantic import BaseModel, Field, ValidationError
 
-# Google Cloud SDKs
+# ─── Google Cloud SDK Imports ──────────────────────────────────────────────────
 from google import genai
+from google.cloud import error_reporting
+from google.cloud import firestore as cloud_firestore
 from google.cloud import logging as cloud_logging
 from google.cloud import secretmanager
-from google.cloud import error_reporting
 
-# Initialize Flask
-app = Flask(__name__, template_folder='.')
+# ─── Flask App ─────────────────────────────────────────────────────────────────
+app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# 1. Initialize Google Cloud Logging safely
+# ─── 1. Cloud Logging ──────────────────────────────────────────────────────────
 try:
-    log_client = cloud_logging.Client()
-    log_client.setup_logging()
+    _log_client = cloud_logging.Client()
+    _log_client.setup_logging()
     logger = logging.getLogger(__name__)
-except Exception:
+    logger.info("Google Cloud Logging initialized")
+except Exception as _e:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
-    logger.info("Using standard local logging")
+    logger.warning("Cloud Logging unavailable, using standard logging: %s", _e)
 
-# 2. Initialize Google Cloud Error Reporting safely
+# ─── 2. Error Reporting ────────────────────────────────────────────────────────
 try:
-    error_client = error_reporting.Client()
-except Exception:
+    error_client: error_reporting.Client | None = error_reporting.Client()
+    logger.info("Google Cloud Error Reporting initialized")
+except Exception as _e:
     error_client = None
-    logger.info("Error Reporting SDK not initialized")
+    logger.warning("Error Reporting unavailable: %s", _e)
 
+# ─── 3. Firestore ──────────────────────────────────────────────────────────────
+try:
+    db: cloud_firestore.Client | None = cloud_firestore.Client()
+    logger.info("Google Cloud Firestore initialized")
+except Exception as _e:
+    db = None
+    logger.warning("Firestore unavailable: %s", _e)
+
+
+# ─── Secret Manager Helper ─────────────────────────────────────────────────────
 def get_secret(secret_id: str) -> str:
-    """
-    Fetches a secret from Google Cloud Secret Manager with fallback to environment variables.
-    
+    """Fetch a secret from Google Cloud Secret Manager with env-var fallback.
+
     Args:
-        secret_id: The ID of the secret to fetch.
-        
+        secret_id: The name of the secret in Secret Manager.
+
     Returns:
-        The secret value as a string.
+        The decoded secret string, or empty string if unavailable.
     """
-    # 1. Try Secret Manager
     try:
         client = secretmanager.SecretManagerServiceClient()
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "humpty-dumpty-001")
-        name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
-        response = client.access_secret_version(request={"name": name})
-        secret_val = response.payload.data.decode("UTF-8").strip()
-        if secret_val:
-            return secret_val
-    except Exception as e:
-        logger.warning(f"Failed to fetch secret '{secret_id}' from Secret Manager: {e}. Falling back to env.")
-    
-    # 2. Fallback to Environment Variable
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+        if project_id:
+            name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            value = response.payload.data.decode("UTF-8").strip()
+            if value:
+                logger.info("Secret '%s' successfully fetched from Secret Manager", secret_id)
+                return value
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch secret '%s' from Secret Manager: %s. Using env fallback.",
+            secret_id,
+            exc,
+        )
     return os.environ.get(secret_id, "")
 
-# Ensure key is fetched after initialization
-API_KEY = get_secret("GEMINI_API_KEY")
-MODEL_NAME = "gemini-3-flash-preview"
 
-# 5. Rate Limiting configuration
+# ─── App Configuration ─────────────────────────────────────────────────────────
+API_KEY: str = get_secret("GEMINI_API_KEY")
+MODEL_NAME: str = "gemini-2.0-flash"
+
+# ─── Rate Limiter ──────────────────────────────────────────────────────────────
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -72,17 +103,23 @@ limiter = Limiter(
     storage_uri="memory://",
 )
 
+# ─── Pydantic Input Model ──────────────────────────────────────────────────────
 class EmergencyRequest(BaseModel):
-    """Pydantic model for strict request validation."""
-    text: str = Field(..., min_length=1, max_length=1000)
+    """Validates and enforces constraints on incoming emergency report payloads."""
 
-SYSTEM_PROMPT = """You are FirstVoice — a calm, authoritative emergency response AI. A bystander is speaking to you in a panic about a medical emergency.
+    text: str = Field(..., min_length=1, max_length=1000,
+                      description="Natural language description of the emergency situation.")
+
+
+# ─── System Prompt ─────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are FirstVoice — a calm, authoritative emergency response AI.
+A bystander is speaking to you in a panic about a medical emergency.
 
 Your job:
 1. Detect the language of the input
-2. Identify the emergency type or detect if it is a Non-Emergency.
+2. Identify the emergency type (or "Non-Emergency" if not urgent)
 3. Respond ENTIRELY in the same language as the input
-4. Return a JSON response with this EXACT structure (all values in the detected language):
+4. Return a JSON response with this EXACT structure:
 
 {
   "detectedLanguage": "English",
@@ -98,67 +135,122 @@ Your job:
 }
 
 CRITICAL RULES:
-- If the input is NOT an emergency, return emergencyType: "Non-Emergency" and severity: "MODERATE".
-- Severity must be exactly: CRITICAL, SERIOUS, or MODERATE
-- Max 5 steps.
+- Non-emergency input: emergencyType = "Non-Emergency", severity = "MODERATE"
+- Severity must be exactly one of: CRITICAL, SERIOUS, MODERATE
+- Maximum 5 steps
 """
 
+
+# ─── Firestore Logger ──────────────────────────────────────────────────────────
+def log_emergency_to_firestore(input_text: str, result: dict[str, Any]) -> None:
+    """Persist an emergency analysis event to Google Cloud Firestore.
+
+    Args:
+        input_text: The raw emergency description from the user.
+        result: The structured AI response dict.
+    """
+    if db is None:
+        return
+    try:
+        doc = {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "inputText": input_text,
+            "emergencyType": result.get("emergencyType", "Unknown"),
+            "severity": result.get("severity", "Unknown"),
+            "detectedLanguage": result.get("detectedLanguage", "Unknown"),
+        }
+        db.collection("emergencies").add(doc)
+        logger.info("Emergency event logged to Firestore: %s", result.get("emergencyType"))
+    except Exception as exc:
+        logger.warning("Firestore write failed: %s", exc)
+
+
+# ─── Security Headers Middleware ───────────────────────────────────────────────
 @app.after_request
 def add_security_headers(response: Response) -> Response:
-    """Adds security headers to every response to improve security score."""
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com;"
+    """Attach strict security headers to every HTTP response.
+
+    Args:
+        response: The Flask response object.
+
+    Returns:
+        The response object with security headers added.
+    """
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com;"
+    )
     return response
 
-@app.errorhandler(429)
-def ratelimit_handler(e: Any) -> tuple:
-    """Handles rate limit exceeded errors with a clean JSON response."""
-    logger.warning(f"Local rate limit hit: {e.description}")
-    return jsonify({
-        "error": f"Local Request Limit Reached: {e.description}. Please slow down for the demo."
-    }), 429
 
+# ─── Rate Limit Handler ────────────────────────────────────────────────────────
+@app.errorhandler(429)
+def ratelimit_handler(exc: Any) -> tuple[Response, int]:
+    """Return a structured JSON error for rate-limited requests.
+
+    Args:
+        exc: The rate limit exception raised by Flask-Limiter.
+
+    Returns:
+        A JSON response with status 429.
+    """
+    logger.warning("Rate limit exceeded: %s", exc.description)
+    return jsonify({"error": f"Too many requests: {exc.description}. Please slow down."}), 429
+
+
+# ─── Routes ────────────────────────────────────────────────────────────────────
 @app.route("/")
 def index() -> str:
-    """Renders the main application page."""
+    """Render the main FirstVoice application page.
+
+    Returns:
+        Rendered HTML string of the main page.
+    """
     return render_template("index.html")
+
 
 @app.route("/analyze", methods=["POST"])
 @limiter.limit("20 per minute")
-def analyze() -> tuple:
+def analyze() -> tuple[Response, int]:
+    """Analyze an emergency description using Gemini AI and return structured guidance.
+
+    Validates the request with Pydantic, calls the Gemini model, logs the result
+    to Firestore, and returns JSON-formatted emergency response steps.
+
+    Returns:
+        A tuple of (JSON response, HTTP status code).
     """
-    Main endpoint to analyze emergency reports using Gemini AI.
-    
-    Validates the input, calls the Gemini API, and returns a structured response.
-    """
+    # ── Validate input ─────────────────────────────────────────────
     try:
         req_data = EmergencyRequest(**request.json)
-    except ValidationError as e:
-        logger.warning(f"Invalid input provided: {e.json()}")
+    except ValidationError as exc:
+        logger.warning("Input validation failed: %s", exc.json())
         return jsonify({"error": "Description is required (Max 1000 characters)."}), 400
     except Exception:
         return jsonify({"error": "Invalid JSON payload"}), 400
 
     if not API_KEY:
         if error_client:
-            error_client.report("Gemini API key missing")
+            error_client.report("Gemini API key missing from environment and Secret Manager")
         return jsonify({"error": "Gemini API key not configured on server"}), 500
 
+    # ── Call Gemini AI ─────────────────────────────────────────────
     try:
-        logger.info(f"Analyzing emergency input of length {len(req_data.text)}")
-        
-        # 2. Configure Gemini Generation
-        from google.genai import types
+        logger.info("Analyzing emergency input (%d chars)", len(req_data.text))
+
+        from google.genai import types  # noqa: PLC0415
+
         genai_client = genai.Client(api_key=API_KEY)
-        
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.1,
-            max_output_tokens=1200
+            max_output_tokens=1200,
         )
-
-        # 3. Call Gemini API
         response = genai_client.models.generate_content(
             model=MODEL_NAME,
             contents=f"{SYSTEM_PROMPT}\n\nEmergency report: {req_data.text}",
@@ -166,24 +258,28 @@ def analyze() -> tuple:
         )
 
         if not response or not response.text:
-            raise ValueError("Empty response from Gemini API")
+            raise ValueError("Empty response received from Gemini API")
 
-        # 4. Parse and return result
-        parsed = json.loads(response.text)
-        logger.info(f"Successfully processed emergency type: {parsed.get('emergencyType')}")
+        parsed: dict[str, Any] = json.loads(response.text)
+        logger.info("Successfully triage: %s (%s)", parsed.get("emergencyType"), parsed.get("severity"))
+
+        # ── Log to Firestore ───────────────────────────────────────
+        log_emergency_to_firestore(req_data.text, parsed)
+
         return jsonify(parsed), 200
 
-    except Exception as e:
+    except Exception as exc:
         if error_client:
             error_client.report_exception()
-        error_msg = str(e)
-        logger.error(f"Execution Error: {error_msg}")
-        
+        error_msg = str(exc)
+        logger.error("Gemini API error: %s", error_msg)
+
         if "429" in error_msg:
-            return jsonify({"error": "Gemini AI Quota Exceeded. The AI is busy, please wait 60 seconds."}), 429
+            return jsonify({"error": "Gemini AI quota exceeded. Please wait 60 seconds and try again."}), 429
         return jsonify({"error": f"Internal server error: {error_msg}"}), 500
 
+
+# ─── Entrypoint ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Get port from env for Cloud Run compatibility
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
