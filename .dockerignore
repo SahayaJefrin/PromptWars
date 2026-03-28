@@ -1,0 +1,22 @@
+# Include any files or directories that you want to exclude from your
+# Docker image.
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git repository
+.git
+.gitignore
+
+# Environment files
+.env
+venv/
+env/
+
+# Editor and system files
+.vscode
+.idea
+.DS_Store

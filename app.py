@@ -1,12 +1,15 @@
 from flask import Flask, request, jsonify, render_template
-import requests
 import os
 import json
 import re
+from google import genai
+from google.genai import types
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='.')
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# Initialize GenAI Client using environment variable
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+MODEL_NAME = "gemini-3-flash-preview"
 
 SYSTEM_PROMPT = """You are FirstVoice — a calm, authoritative emergency response AI. A bystander is speaking to you in a panic about a medical emergency happening right now.
 
@@ -44,54 +47,51 @@ def index():
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
+    # Ensure api_key is configured (though client is initialized above)
+    if not os.getenv("GEMINI_API_KEY"):
+        return jsonify({"error": "Gemini API key not configured on server"}), 500
+
     data = request.json
-    api_key = data.get("apiKey", "").strip()
     text = data.get("text", "").strip()
 
-    if not api_key:
-        return jsonify({"error": "API key is required"}), 400
     if not text:
         return jsonify({"error": "Emergency description is required"}), 400
 
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": SYSTEM_PROMPT + "\n\nEmergency report from bystander: " + text}
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 1200
-        }
-    }
-
     try:
-        resp = requests.post(
-            f"{GEMINI_URL}?key={api_key}",
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=15
+        # Configure tools and thinking based on reference
+        generate_content_config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                thinking_level="HIGH",
+            ),
+            tools=[types.Tool(googleSearch=types.GoogleSearch())],
+            temperature=0.1,  # Keep low for structured output
+            max_output_tokens=1200
         )
-        resp.raise_for_status()
-        gemini_data = resp.json()
 
-        raw = gemini_data["candidates"][0]["content"]["parts"][0]["text"]
-        # Strip markdown code fences if present
+        # Generate content using the new SDK
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=SYSTEM_PROMPT + "\n\nEmergency report from bystander: " + text,
+            config=generate_content_config,
+        )
+
+        if not response or not response.text:
+            return jsonify({"error": "No response from AI. Try again."}), 500
+
+        raw = response.text
+        # Strip markdown code fences if present (Gemini often wraps JSON)
         clean = re.sub(r"```json|```", "", raw).strip()
         parsed = json.loads(clean)
         return jsonify(parsed)
 
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Request timed out. Please try again."}), 504
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"error": f"Gemini API error: {e.response.status_code}"}), 502
-    except (json.JSONDecodeError, KeyError) as e:
-        return jsonify({"error": "Failed to parse response. Try again."}), 500
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Handle API or parsing errors
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg:
+            return jsonify({"error": "Invalid API Key"}), 401
+        return jsonify({"error": error_msg}), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(debug=True, host="0.0.0.0", port=port)

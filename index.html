@@ -447,11 +447,7 @@
   <!-- MAIN CONTENT -->
   <main class="main">
 
-    <!-- API KEY CARD -->
-    <div class="card">
-      <div class="card-label" id="lbl-apikey">Gemini API Key</div>
-      <input type="password" class="api-input" id="apiKey" placeholder="AIza..." />
-    </div>
+    <!-- EMERGENCY REPORTING -->
 
     <!-- INPUT CARD -->
     <div class="card">
@@ -515,7 +511,6 @@ let currentTranscript = '';
 // ─── i18n ─────────────────────────────────────────────────
 const i18n = {
   en: {
-    apikey:     'Gemini API Key',
     describe:   'Describe the Emergency',
     placeholder:'Press 🎙 and speak what\'s happening...',
     typehere:   'e.g. My uncle collapsed, not breathing...',
@@ -531,10 +526,8 @@ const i18n = {
     listening:  'Listening... speak now',
     speechErr:  'Speech recognition not available. Please type instead.',
     noInput:    'Please speak or type the emergency situation.',
-    noKey:      'Please enter your Gemini API key.',
   },
   hi: {
-    apikey:     'Gemini API की',
     describe:   'आपातकाल का वर्णन करें',
     placeholder:'🎙 दबाएं और बोलें क्या हो रहा है...',
     typehere:   'उदा. मेरे चाचा गिर गए, सांस नहीं ले रहे...',
@@ -550,10 +543,8 @@ const i18n = {
     listening:  'सुन रहा हूं... अभी बोलें',
     speechErr:  'वॉइस उपलब्ध नहीं। कृपया टाइप करें।',
     noInput:    'कृपया आपातकाल बताएं।',
-    noKey:      'कृपया Gemini API कुंजी दर्ज करें।',
   },
   kn: {
-    apikey:     'Gemini API ಕೀ',
     describe:   'ತುರ್ತು ಪರಿಸ್ಥಿತಿ ವಿವರಿಸಿ',
     placeholder:'🎙 ಒತ್ತಿ ಮತ್ತು ಏನಾಗುತ್ತಿದೆ ಎಂದು ಹೇಳಿ...',
     typehere:   'ಉದಾ. ನನ್ನ ಅಂಕಲ್ ಬಿದ್ದರು, ಉಸಿರಾಡುತ್ತಿಲ್ಲ...',
@@ -569,10 +560,8 @@ const i18n = {
     listening:  'ಆಲಿಸುತ್ತಿದ್ದೇನೆ...',
     speechErr:  'ಧ್ವನಿ ಲಭ್ಯವಿಲ್ಲ. ದಯವಿಟ್ಟು ಟೈಪ್ ಮಾಡಿ.',
     noInput:    'ದಯವಿಟ್ಟು ತುರ್ತು ಪರಿಸ್ಥಿತಿ ತಿಳಿಸಿ.',
-    noKey:      'ದಯವಿಟ್ಟು Gemini API ಕೀ ನಮೂದಿಸಿ.',
   },
   ta: {
-    apikey:     'Gemini API திறவுகோல்',
     describe:   'அவசரநிலையை விவரிக்கவும்',
     placeholder:'🎙 அழுத்தி என்ன நடக்கிறது என்று சொல்லுங்கள்...',
     typehere:   'எ.கா. என் மாமா விழுந்தார், மூச்சு இல்லை...',
@@ -588,10 +577,8 @@ const i18n = {
     listening:  'கேட்கிறேன்...',
     speechErr:  'குரல் இல்லை. தட்டச்சு செய்யுங்கள்.',
     noInput:    'அவசரநிலையை தெரிவிக்கவும்.',
-    noKey:      'Gemini API திறவுகோல் உள்ளிடவும்.',
   },
   te: {
-    apikey:     'Gemini API కీ',
     describe:   'అత్యవసర పరిస్థితిని వివరించండి',
     placeholder:'🎙 నొక్కి ఏమి జరుగుతుందో చెప్పండి...',
     typehere:   'ఉదా. మా అంకుల్ పడిపోయారు, శ్వాస తీసుకోవడం లేదు...',
@@ -607,10 +594,8 @@ const i18n = {
     listening:  'వింటున్నాను...',
     speechErr:  'వాయిస్ అందుబాటులో లేదు. దయచేసి టైప్ చేయండి.',
     noInput:    'అత్యవసర పరిస్థితిని తెలియజేయండి.',
-    noKey:      'దయచేసి Gemini API కీని నమోదు చేయండి.',
   },
   mr: {
-    apikey:     'Gemini API की',
     describe:   'आणीबाणीचे वर्णन करा',
     placeholder:'🎙 दाबा आणि काय होत आहे ते सांगा...',
     typehere:   'उदा. माझे काका पडले, श्वास घेत नाहीत...',
@@ -626,7 +611,6 @@ const i18n = {
     listening:  'ऐकत आहे...',
     speechErr:  'व्हॉइस उपलब्ध नाही. कृपया टाइप करा.',
     noInput:    'कृपया आणीबाणी सांगा.',
-    noKey:      'कृपया Gemini API की प्रविष्ट करा.',
   }
 };
 
@@ -642,7 +626,6 @@ function setLang(lang) {
     c.classList.toggle('active', c.dataset.lang === lang);
   });
   const t = i18n[lang];
-  document.getElementById('lbl-apikey').textContent       = t.apikey;
   document.getElementById('lbl-describe').textContent     = t.describe;
   document.getElementById('lbl-or').textContent           = t.or;
   document.getElementById('lbl-analyzing').textContent    = t.analyzing;
@@ -737,11 +720,9 @@ function stopMic() {
 
 // ─── ANALYZE ─────────────────────────────────────────────
 async function analyze() {
-  const apiKey  = document.getElementById('apiKey').value.trim();
   const manual  = document.getElementById('manualInput').value.trim();
   const input   = currentTranscript || manual;
 
-  if (!apiKey) { showError(t('noKey')); return; }
   if (!input)  { showError(t('noInput')); return; }
 
   stopMic();
@@ -754,7 +735,7 @@ async function analyze() {
     const res = await fetch('/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey, text: input })
+      body: JSON.stringify({ text: input })
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
