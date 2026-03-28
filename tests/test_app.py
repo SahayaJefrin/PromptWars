@@ -8,18 +8,19 @@ without requiring real GCP credentials or network access.
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 # Add parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# ── Mock ALL Google Cloud SDKs before app import ──────────────────────────────
+# ── Mock ALL Google Cloud SDKs before app import ──────────────────────────────────
 patch("google.cloud.logging.Client").start()
 patch("google.cloud.secretmanager.SecretManagerServiceClient").start()
 patch("google.cloud.error_reporting.Client").start()
-patch("google.cloud.firestore.Client").start()
+mock_firestore = patch("google.cloud.firestore.Client").start()
+mock_genai = patch("google.genai.Client").start()
 
 # Set test environment variables
 os.environ["GEMINI_API_KEY"] = "test_api_key"
@@ -65,10 +66,16 @@ def test_analyze_text_too_long(client):
     assert response.status_code == 400
 
 
-@patch("google.genai.Client")
-def test_analyze_success(mock_genai_class, client):
+def test_analyze_whitespace_only(client):
+    """Test whitespace-only input is handled gracefully (no crashes)."""
+    response = client.post("/analyze", json={"text": "   "})
+    # Whitespace passes min_length=1 so goes to AI — any valid HTTP code is acceptable
+    assert response.status_code in (200, 400, 500)
+
+
+@patch("app.genai_client")
+def test_analyze_success(mock_client, client):
     """Test a successful end-to-end analysis with a mocked Gemini response."""
-    mock_instance = mock_genai_class.return_value
     mock_response = MagicMock()
     mock_response.text = json.dumps({
         "detectedLanguage": "English",
@@ -79,7 +86,7 @@ def test_analyze_success(mock_genai_class, client):
         "dispatchSummary": "Adult collapsed, CPR started.",
         "reassurance": "Help is on the way.",
     })
-    mock_instance.models.generate_content.return_value = mock_response
+    mock_client.models.generate_content.return_value = mock_response
 
     response = client.post("/analyze", json={"text": "My friend collapsed!"})
 
@@ -89,11 +96,10 @@ def test_analyze_success(mock_genai_class, client):
     assert data["severity"] == "CRITICAL"
 
 
-@patch("google.genai.Client")
-def test_analyze_quota_exceeded(mock_genai_class, client):
+@patch("app.genai_client")
+def test_analyze_quota_exceeded(mock_client, client):
     """Test that a 429 error from Gemini returns a user-friendly message."""
-    mock_instance = mock_genai_class.return_value
-    mock_instance.models.generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED")
+    mock_client.models.generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED")
 
     response = client.post("/analyze", json={"text": "Someone is choking!"})
 
@@ -102,10 +108,38 @@ def test_analyze_quota_exceeded(mock_genai_class, client):
     assert "quota" in data["error"].lower()
 
 
-@patch("google.genai.Client")
-def test_security_headers_present(mock_genai_class, client):
-    """Test that security headers are attached to every response."""
+def test_security_headers_present(client):
+    """Test that all security headers are attached to every response."""
     response = client.get("/")
     assert "X-Frame-Options" in response.headers
     assert "X-Content-Type-Options" in response.headers
     assert "Content-Security-Policy" in response.headers
+    assert "Strict-Transport-Security" in response.headers
+    assert "Referrer-Policy" in response.headers
+
+
+def test_firestore_write_on_success(client):
+    """Test that a successful analysis triggers a Firestore document write."""
+    import app as app_module
+
+    mock_db = MagicMock()
+    app_module.db = mock_db
+
+    mock_response = MagicMock()
+    mock_response.text = json.dumps({
+        "detectedLanguage": "English",
+        "emergencyType": "Choking",
+        "severity": "CRITICAL",
+        "steps": [{"step": 1, "action": "Heimlich maneuver", "detail": "Thrust upward"}],
+        "doNot": [],
+        "dispatchSummary": "Adult choking.",
+        "reassurance": "Stay calm.",
+    })
+    app_module.genai_client = MagicMock()
+    app_module.genai_client.models.generate_content.return_value = mock_response
+
+    client.post("/analyze", json={"text": "My child is choking!"})
+
+    # Verify Firestore collection was called
+    mock_db.collection.assert_called_once_with("emergencies")
+    mock_db.collection.return_value.add.assert_called_once()

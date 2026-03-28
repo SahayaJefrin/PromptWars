@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 # ─── Google Cloud SDK Imports ──────────────────────────────────────────────────
 from google import genai
+from google.genai import types as genai_types
 from google.cloud import error_reporting
 from google.cloud import firestore as cloud_firestore
 from google.cloud import logging as cloud_logging
@@ -94,6 +95,9 @@ def get_secret(secret_id: str) -> str:
 # ─── App Configuration ─────────────────────────────────────────────────────────
 API_KEY: str = get_secret("GEMINI_API_KEY")
 MODEL_NAME: str = "gemini-2.0-flash"
+
+# ─── Gemini Client (module-level singleton for efficiency) ─────────────────────
+genai_client: genai.Client | None = genai.Client(api_key=API_KEY) if API_KEY else None
 
 # ─── Rate Limiter ──────────────────────────────────────────────────────────────
 limiter = Limiter(
@@ -179,10 +183,11 @@ def add_security_headers(response: Response) -> Response:
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "script-src 'self'; "
+        "style-src 'self' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com;"
     )
     return response
@@ -234,19 +239,15 @@ def analyze() -> tuple[Response, int]:
     except Exception:
         return jsonify({"error": "Invalid JSON payload"}), 400
 
-    if not API_KEY:
-        if error_client:
-            error_client.report("Gemini API key missing from environment and Secret Manager")
+
+    if not genai_client:
         return jsonify({"error": "Gemini API key not configured on server"}), 500
 
     # ── Call Gemini AI ─────────────────────────────────────────────
     try:
         logger.info("Analyzing emergency input (%d chars)", len(req_data.text))
 
-        from google.genai import types  # noqa: PLC0415
-
-        genai_client = genai.Client(api_key=API_KEY)
-        config = types.GenerateContentConfig(
+        config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.1,
             max_output_tokens=1200,
