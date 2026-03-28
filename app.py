@@ -194,6 +194,35 @@ def add_security_headers(response: Response) -> Response:
 
 
 # ─── Rate Limit Handler ────────────────────────────────────────────────────────
+@app.errorhandler(500)
+def internal_error_handler(exc: Any) -> tuple[Response, int]:
+    """Return JSON for all 500 errors — prevents Cloud Run from serving HTML error pages.
+
+    Args:
+        exc: The exception that triggered the 500.
+
+    Returns:
+        A JSON response with status 500.
+    """
+    logger.error("Internal server error: %s", exc)
+    if error_client:
+        error_client.report_exception()
+    return jsonify({"error": "An internal server error occurred. Please try again."}), 500
+
+
+@app.errorhandler(404)
+def not_found_handler(exc: Any) -> tuple[Response, int]:
+    """Return JSON for 404 errors.
+
+    Args:
+        exc: The exception that triggered the 404.
+
+    Returns:
+        A JSON response with status 404.
+    """
+    return jsonify({"error": "Endpoint not found."}), 404
+
+
 @app.errorhandler(429)
 def ratelimit_handler(exc: Any) -> tuple[Response, int]:
     """Return a structured JSON error for rate-limited requests.
