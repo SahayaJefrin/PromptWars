@@ -88,8 +88,13 @@ def add_security_headers(response):
 def index():
     return render_template("index.html")
 
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    logger.warning(f"Local rate limit hit: {e.description}")
+    return jsonify({"error": f"Local Request Limit Reached: {e.description}. Please slow down for the demo."}), 429
+
 @app.route("/analyze", methods=["POST"])
-@limiter.limit("5 per minute")
+@limiter.limit("20 per minute")
 def analyze():
     if not os.getenv("GEMINI_API_KEY"):
         logger.error("Gemini API key not configured on server")
@@ -145,7 +150,7 @@ def analyze():
         if "API_KEY_INVALID" in error_msg:
             return jsonify({"error": "Invalid API Key"}), 401
         if "429" in error_msg:
-            return jsonify({"error": "API rate limit exceeded. Please try again later."}), 429
+            return jsonify({"error": "Gemini AI Quota Exceeded. The AI is busy, please wait 60 seconds."}), 429
         return jsonify({"error": error_msg}), 500
 
 if __name__ == "__main__":
