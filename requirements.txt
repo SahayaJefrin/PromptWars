@@ -5,3 +5,8 @@ google-genai
 Flask-Limiter
 pytest
 pytest-mock
+google-cloud-secret-manager
+google-cloud-error-reporting
+google-cloud-logging
+google-cloud-trace
+pydantic

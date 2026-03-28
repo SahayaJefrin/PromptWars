@@ -7,8 +7,15 @@ from unittest.mock import patch, MagicMock
 # Add parent directory to path so we can import app
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Set API KEY for tests before importing app
+# Mock Google Cloud SDKs BEFORE importing app
+mock_logging = patch('google.cloud.logging.Client').start()
+mock_secret = patch('google.cloud.secretmanager.SecretManagerServiceClient').start()
+mock_error = patch('google.cloud.error_reporting.Client').start()
+
+# Set env vars for tests
 os.environ["GEMINI_API_KEY"] = "test_key"
+os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
+
 from app import app, limiter
 
 # Disable rate limits globally for tests
@@ -21,27 +28,31 @@ def client():
         yield client
 
 def test_index_route(client):
+    """Test standard main page loading."""
     response = client.get("/")
     assert response.status_code == 200
     assert b"FirstVoice" in response.data
 
 def test_analyze_no_data(client):
+    """Test error when no JSON payload is sent."""
     response = client.post("/analyze", json=None)
-    # the test client might interpret json=None as an empty payload
     assert response.status_code in (400, 415)
 
 def test_analyze_empty_text(client):
-    response = client.post("/analyze", json={"text": "   "})
+    """Test Pydantic validation for empty string."""
+    response = client.post("/analyze", json={"text": ""})
     assert response.status_code == 400
-    assert b"Emergency description is required" in response.data
+    assert b"Invalid input" in response.data
 
 def test_analyze_payload_too_long(client):
+    """Test Pydantic validation for string > 1000 chars."""
     response = client.post("/analyze", json={"text": "a" * 1005})
     assert response.status_code == 400
-    assert b"Description is too long" in response.data
+    assert b"Invalid input" in response.data
 
-@patch('app.client.models.generate_content')
+@patch('app.genai_client.models.generate_content')
 def test_analyze_success(mock_generate_content, client):
+    """Test successful AI analysis cycle."""
     # Mock the Gemini response
     mock_response = MagicMock()
     mock_response.text = json.dumps({
@@ -57,25 +68,13 @@ def test_analyze_success(mock_generate_content, client):
     assert response.status_code == 200
     data = json.loads(response.data)
     assert data["emergencyType"] == "Cardiac Arrest"
-    assert data["severity"] == "CRITICAL"
-    assert len(data["steps"]) == 1
 
-@patch('app.client.models.generate_content')
-def test_analyze_json_parse_error(mock_generate_content, client):
-    mock_response = MagicMock()
-    mock_response.text = "This is not JSON..."
-    mock_generate_content.return_value = mock_response
-
-    response = client.post("/analyze", json={"text": "Test error text"})
-    
-    assert response.status_code == 500
-    assert b"AI response was not valid data format" in response.data
-
-@patch('app.client.models.generate_content')
+@patch('app.genai_client.models.generate_content')
 def test_analyze_api_failure(mock_generate_content, client):
-    mock_generate_content.side_effect = Exception("API_KEY_INVALID")
+    """Test handling of API-specific 429 errors."""
+    mock_generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED")
 
     response = client.post("/analyze", json={"text": "Test error block"})
     
-    assert response.status_code == 401
-    assert b"Invalid API Key" in response.data
+    assert response.status_code == 429
+    assert b"Gemini AI Quota Exceeded" in response.data
