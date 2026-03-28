@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 # Google Cloud SDKs
 from google import genai
-from google.genai import types
 from google.cloud import logging as cloud_logging
 from google.cloud import secretmanager
 from google.cloud import error_reporting
@@ -19,17 +18,26 @@ from google.cloud import error_reporting
 # Initialize Flask
 app = Flask(__name__, template_folder='.')
 
-# 1. Initialize Google Cloud Logging
-log_client = cloud_logging.Client()
-log_client.setup_logging()
-logger = logging.getLogger(__name__)
+# 1. Initialize Google Cloud Logging safely
+try:
+    log_client = cloud_logging.Client()
+    log_client.setup_logging()
+    logger = logging.getLogger(__name__)
+except Exception:
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.info("Using standard local logging")
 
-# 2. Initialize Google Cloud Error Reporting
-error_client = error_reporting.Client()
+# 2. Initialize Google Cloud Error Reporting safely
+try:
+    error_client = error_reporting.Client()
+except Exception:
+    error_client = None
+    logger.info("Error Reporting SDK not initialized")
 
 def get_secret(secret_id: str) -> str:
     """
-    Fetches a secret from Google Cloud Secret Manager.
+    Fetches a secret from Google Cloud Secret Manager with fallback to environment variables.
     
     Args:
         secret_id: The ID of the secret to fetch.
@@ -37,20 +45,23 @@ def get_secret(secret_id: str) -> str:
     Returns:
         The secret value as a string.
     """
+    # 1. Try Secret Manager
     try:
         client = secretmanager.SecretManagerServiceClient()
-        # Project ID is usually available as an env var on Cloud Run
         project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "humpty-dumpty-001")
         name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
         response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("UTF-8")
+        secret_val = response.payload.data.decode("UTF-8").strip()
+        if secret_val:
+            return secret_val
     except Exception as e:
-        logger.warning(f"Failed to fetch secret from Secret Manager: {e}. Falling back to env vars.")
-        return os.getenv(secret_id, "")
+        logger.warning(f"Failed to fetch secret '{secret_id}' from Secret Manager: {e}. Falling back to env.")
+    
+    # 2. Fallback to Environment Variable
+    return os.environ.get(secret_id, "")
 
-# 4. Initialize Gemini Client
+# Ensure key is fetched after initialization
 API_KEY = get_secret("GEMINI_API_KEY")
-genai_client = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3-flash-preview"
 
 # 5. Rate Limiting configuration
@@ -122,22 +133,25 @@ def analyze() -> tuple:
     Validates the input, calls the Gemini API, and returns a structured response.
     """
     try:
-        # 1. Validate Input using Pydantic
         req_data = EmergencyRequest(**request.json)
     except ValidationError as e:
         logger.warning(f"Invalid input provided: {e.json()}")
-        return jsonify({"error": "Invalid input. Please provide a description under 1000 characters."}), 400
+        return jsonify({"error": "Description is required (Max 1000 characters)."}), 400
     except Exception:
         return jsonify({"error": "Invalid JSON payload"}), 400
 
     if not API_KEY:
-        error_client.report("Gemini API key missing")
+        if error_client:
+            error_client.report("Gemini API key missing")
         return jsonify({"error": "Gemini API key not configured on server"}), 500
 
     try:
         logger.info(f"Analyzing emergency input of length {len(req_data.text)}")
         
         # 2. Configure Gemini Generation
+        from google.genai import types
+        genai_client = genai.Client(api_key=API_KEY)
+        
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.1,
@@ -160,7 +174,8 @@ def analyze() -> tuple:
         return jsonify(parsed), 200
 
     except Exception as e:
-        error_client.report_exception() # Automatically report crash to GCP
+        if error_client:
+            error_client.report_exception()
         error_msg = str(e)
         logger.error(f"Execution Error: {error_msg}")
         
@@ -172,4 +187,3 @@ if __name__ == "__main__":
     # Get port from env for Cloud Run compatibility
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-
