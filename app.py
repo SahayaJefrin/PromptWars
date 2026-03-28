@@ -212,15 +212,20 @@ def internal_error_handler(exc: Any) -> tuple[Response, int]:
 
 @app.errorhandler(404)
 def not_found_handler(exc: Any) -> tuple[Response, int]:
-    """Return JSON for 404 errors.
-
-    Args:
-        exc: The exception that triggered the 404.
-
-    Returns:
-        A JSON response with status 404.
-    """
+    """Return JSON for 404 errors."""
     return jsonify({"error": "Endpoint not found."}), 404
+
+
+@app.errorhandler(400)
+def bad_request_handler(exc: Any) -> tuple[Response, int]:
+    """Return JSON for 400 errors."""
+    return jsonify({"error": "Bad request. Invalid input format."}), 400
+
+
+@app.errorhandler(405)
+def method_not_allowed_handler(exc: Any) -> tuple[Response, int]:
+    """Return JSON for 405 errors."""
+    return jsonify({"error": "Method not allowed."}), 405
 
 
 @app.errorhandler(429)
@@ -260,13 +265,17 @@ def analyze() -> tuple[Response, int]:
         A tuple of (JSON response, HTTP status code).
     """
     # ── Validate input ─────────────────────────────────────────────
+    req_json = request.get_json(silent=True)
+    if not req_json:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
     try:
-        req_data = EmergencyRequest(**request.json)
+        req_data = EmergencyRequest(**req_json)
     except ValidationError as exc:
         logger.warning("Input validation failed: %s", exc.json())
         return jsonify({"error": "Description is required (Max 1000 characters)."}), 400
     except Exception:
-        return jsonify({"error": "Invalid JSON payload"}), 400
+        return jsonify({"error": "Invalid request"}), 400
 
 
     if not genai_client:
